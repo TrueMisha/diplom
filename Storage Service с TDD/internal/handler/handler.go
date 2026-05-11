@@ -1,0 +1,346 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/brandmon/storage-service/internal/model"
+	"github.com/brandmon/storage-service/internal/repository"
+)
+
+// ─── Request / Response types ─────────────────────────────────────────────────
+
+type CreateJobRequest struct {
+	Brand      string `json:"brand"`
+	URL        string `json:"url"`
+	SourceType string `json:"source_type"`
+}
+
+type JobResponse struct {
+	ID         string  `json:"id"`
+	Brand      string  `json:"brand"`
+	URL        string  `json:"url"`
+	SourceType string  `json:"source_type"`
+	Status     string  `json:"status"`
+	ErrorMsg   string  `json:"error_msg,omitempty"`
+	CreatedAt  string  `json:"created_at"`
+}
+
+type SaveWordsRequest struct {
+	Brand     string      `json:"brand"`
+	SourceURL string      `json:"source_url"`
+	Words     []WordEntry `json:"words"`
+}
+
+type WordEntry struct {
+	Word      string `json:"word"`
+	Frequency int    `json:"frequency"`
+}
+
+type TopWordsResponse struct {
+	Brand string                 `json:"brand"`
+	Words []model.WordFreqResult `json:"words"`
+}
+
+type ErrorResponse struct {
+	Error string `json:"error"`
+}
+
+// ─── Store interface — позволяет подменять реальный Postgres на in-memory ─────
+
+type Store interface {
+	CreateJob(ctx context.Context, job *model.ScrapeJob) (*model.ScrapeJob, error)
+	GetJobByID(ctx context.Context, id string) (*model.ScrapeJob, error)
+	SaveWords(ctx context.Context, words []model.ParsedWord) error
+	GetTopWords(ctx context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error)
+}
+
+// ─── pgStore — реальная реализация через репозитории ─────────────────────────
+
+type pgStore struct {
+	jobs  *repository.ScrapeJobRepo
+	words *repository.ParsedWordRepo
+}
+
+func (s *pgStore) CreateJob(ctx context.Context, job *model.ScrapeJob) (*model.ScrapeJob, error) {
+	return s.jobs.Create(ctx, job)
+}
+func (s *pgStore) GetJobByID(ctx context.Context, id string) (*model.ScrapeJob, error) {
+	return s.jobs.GetByID(ctx, id)
+}
+func (s *pgStore) SaveWords(ctx context.Context, words []model.ParsedWord) error {
+	return s.words.SaveBatch(ctx, words)
+}
+func (s *pgStore) GetTopWords(ctx context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error) {
+	return s.words.GetTopWords(ctx, q)
+}
+
+// ─── memStore — in-memory реализация для unit-тестов handler ─────────────────
+
+type memStore struct {
+	mu    sync.RWMutex
+	jobs  map[string]*model.ScrapeJob
+	words []model.ParsedWord
+}
+
+func newMemStore() *memStore {
+	return &memStore{jobs: make(map[string]*model.ScrapeJob)}
+}
+
+func (s *memStore) CreateJob(_ context.Context, job *model.ScrapeJob) (*model.ScrapeJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	j := *job
+	j.ID = uuid.New().String()
+	j.Status = model.JobStatusPending
+	j.CreatedAt = time.Now()
+	j.UpdatedAt = time.Now()
+	s.jobs[j.ID] = &j
+	return &j, nil
+}
+
+func (s *memStore) GetJobByID(_ context.Context, id string) (*model.ScrapeJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j, ok := s.jobs[id]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return j, nil
+}
+
+func (s *memStore) SaveWords(_ context.Context, words []model.ParsedWord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.words = append(s.words, words...)
+	return nil
+}
+
+func (s *memStore) GetTopWords(_ context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	counts := map[string]int{}
+	for _, w := range s.words {
+		if w.Brand == q.Brand {
+			counts[w.Word] += w.Frequency
+		}
+	}
+
+	results := make([]model.WordFreqResult, 0, len(counts))
+	for word, freq := range counts {
+		results = append(results, model.WordFreqResult{Word: word, Frequency: freq})
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Frequency > results[j].Frequency
+	})
+
+	limit := q.Limit
+	if limit <= 0 || limit > len(results) {
+		limit = len(results)
+	}
+	return results[:limit], nil
+}
+
+// ─── Option functions ─────────────────────────────────────────────────────────
+
+type option func(*Handler)
+
+func WithMemoryStore() option {
+	return func(h *Handler) { h.store = newMemStore() }
+}
+
+func WithPgStore(jobs *repository.ScrapeJobRepo, words *repository.ParsedWordRepo) option {
+	return func(h *Handler) {
+		h.store = &pgStore{jobs: jobs, words: words}
+	}
+}
+
+// ─── Handler ─────────────────────────────────────────────────────────────────
+
+type Handler struct {
+	mux   *http.ServeMux
+	store Store
+}
+
+func New(opts ...option) *Handler {
+	h := &Handler{mux: http.NewServeMux()}
+	for _, o := range opts {
+		o(h)
+	}
+	if h.store == nil {
+		h.store = newMemStore() // дефолт
+	}
+	h.mux.HandleFunc("/jobs", h.handleJobs)
+	h.mux.HandleFunc("/jobs/", h.handleJobByID)
+	h.mux.HandleFunc("/words", h.handleWords)
+	h.mux.HandleFunc("/health", h.handleHealth)
+	return h
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.mux.ServeHTTP(w, r)
+}
+
+// ─── /jobs ────────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleJobs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		h.createJob(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) createJob(w http.ResponseWriter, r *http.Request) {
+	var req CreateJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	job := &model.ScrapeJob{
+		Brand:      req.Brand,
+		URL:        req.URL,
+		SourceType: model.SourceType(req.SourceType),
+	}
+	if err := job.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	created, err := h.store.CreateJob(r.Context(), job)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, toJobResponse(created))
+}
+
+// ─── /jobs/:id ────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleJobByID(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/jobs/")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		job, err := h.store.GetJobByID(r.Context(), id)
+		if errors.Is(err, repository.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "job not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, toJobResponse(job))
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// ─── /words ───────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleWords(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		h.saveWords(w, r)
+	case http.MethodGet:
+		h.getTopWords(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) saveWords(w http.ResponseWriter, r *http.Request) {
+	var req SaveWordsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if strings.TrimSpace(req.Brand) == "" {
+		writeError(w, http.StatusBadRequest, "brand is required")
+		return
+	}
+
+	words := make([]model.ParsedWord, len(req.Words))
+	for i, e := range req.Words {
+		words[i] = model.ParsedWord{
+			Brand: req.Brand, SourceURL: req.SourceURL,
+			Word: e.Word, Frequency: e.Frequency,
+		}
+	}
+
+	if err := h.store.SaveWords(r.Context(), words); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]int{"saved": len(words)})
+}
+
+func (h *Handler) getTopWords(w http.ResponseWriter, r *http.Request) {
+	brand := r.URL.Query().Get("brand")
+	if brand == "" {
+		writeError(w, http.StatusBadRequest, "brand query parameter is required")
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 20
+	}
+
+	results, err := h.store.GetTopWords(r.Context(), model.TopWordsQuery{Brand: brand, Limit: limit})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, TopWordsResponse{Brand: brand, Words: results})
+}
+
+// ─── /health ─────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+func toJobResponse(j *model.ScrapeJob) JobResponse {
+	return JobResponse{
+		ID:         j.ID,
+		Brand:      j.Brand,
+		URL:        j.URL,
+		SourceType: string(j.SourceType),
+		Status:     string(j.Status),
+		ErrorMsg:   j.ErrorMsg,
+		CreatedAt:  j.CreatedAt.Format(time.RFC3339),
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, ErrorResponse{Error: msg})
+}

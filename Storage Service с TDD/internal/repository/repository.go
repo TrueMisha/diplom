@@ -295,6 +295,74 @@ func (r *CooccurrenceRepo) GetNeighbors(ctx context.Context, q model.Cooccurrenc
 	return results, rows.Err()
 }
 
+// ─── ReviewRepository ─────────────────────────────────────────────────────────
+
+type ReviewRepo struct {
+	db *pgxpool.Pool
+}
+
+func NewReviewRepo(db *pgxpool.Pool) *ReviewRepo {
+	return &ReviewRepo{db: db}
+}
+
+func (r *ReviewRepo) SaveBatch(ctx context.Context, reviews []model.Review) error {
+	if len(reviews) == 0 {
+		return nil
+	}
+
+	batch := &pgx.Batch{}
+	const q = `
+		INSERT INTO reviews (job_id, brand, source_url, title, text, rating, review_date, pros, cons)
+		VALUES (NULLIF($1, '')::uuid, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9)`
+
+	for _, rv := range reviews {
+		batch.Queue(q, rv.JobID, rv.Brand, rv.SourceURL,
+			rv.Title, rv.Text, rv.Rating, rv.ReviewDate, rv.Pros, rv.Cons)
+	}
+
+	br := r.db.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for range reviews {
+		if _, err := br.Exec(); err != nil {
+			return fmt.Errorf("save review batch: %w", err)
+		}
+	}
+	return nil
+}
+
+func (r *ReviewRepo) GetByBrand(ctx context.Context, brand string, limit int) ([]model.Review, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	const q = `
+		SELECT id, COALESCE(job_id::text, ''), brand, source_url,
+		       title, text, rating, COALESCE(review_date, ''), pros, cons, scraped_at
+		FROM reviews
+		WHERE brand = $1
+		ORDER BY scraped_at DESC
+		LIMIT $2`
+
+	rows, err := r.db.Query(ctx, q, brand, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get reviews by brand: %w", err)
+	}
+	defer rows.Close()
+
+	var results []model.Review
+	for rows.Next() {
+		var rv model.Review
+		if err := rows.Scan(&rv.ID, &rv.JobID, &rv.Brand, &rv.SourceURL,
+			&rv.Title, &rv.Text, &rv.Rating, &rv.ReviewDate,
+			&rv.Pros, &rv.Cons, &rv.ScrapedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, rv)
+	}
+	return results, rows.Err()
+}
+
 // ─── Storage — фасад для транзакционного сохранения ──────────────────────────
 
 type ScrapedData struct {

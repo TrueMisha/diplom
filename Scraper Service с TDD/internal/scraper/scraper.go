@@ -85,7 +85,10 @@ func (s *HTMLScraper) Scrape(rawURL string, opts Options) (*ScrapeResult, error)
 	if err != nil {
 		return nil, err
 	}
-	text := s.extractText(result.Body, opts)
+	text, err := s.extractText(result.Body, opts)
+	if err != nil {
+		return nil, err
+	}
 	title := extractTitle(result.Body)
 	return &ScrapeResult{
 		SourceURL: rawURL,
@@ -96,10 +99,10 @@ func (s *HTMLScraper) Scrape(rawURL string, opts Options) (*ScrapeResult, error)
 	}, nil
 }
 
-func (s *HTMLScraper) extractText(html string, opts Options) string {
+func (s *HTMLScraper) extractText(html string, opts Options) (string, error) {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("parse html: %w", err)
 	}
 	for _, sel := range excludeSelectors {
 		doc.Find(sel).Remove()
@@ -117,7 +120,7 @@ func (s *HTMLScraper) extractText(html string, opts Options) string {
 			}
 		})
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), nil
 }
 
 type DispatcherConfig struct {

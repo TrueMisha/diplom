@@ -51,6 +51,28 @@ type TopWordsResponse struct {
 	Words []model.WordFreqResult `json:"words"`
 }
 
+type SaveReviewsRequest struct {
+	Brand     string         `json:"brand"`
+	SourceURL string         `json:"source_url"`
+	JobID     string         `json:"job_id,omitempty"`
+	Reviews   []ReviewEntry  `json:"reviews"`
+}
+
+type ReviewEntry struct {
+	Title      string `json:"title"`
+	Text       string `json:"text"`
+	Rating     string `json:"rating,omitempty"`
+	ReviewDate string `json:"review_date,omitempty"`
+	Pros       string `json:"pros,omitempty"`
+	Cons       string `json:"cons,omitempty"`
+}
+
+type ReviewsResponse struct {
+	Brand   string         `json:"brand"`
+	Total   int            `json:"total"`
+	Reviews []model.Review `json:"reviews"`
+}
+
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
@@ -62,13 +84,16 @@ type Store interface {
 	GetJobByID(ctx context.Context, id string) (*model.ScrapeJob, error)
 	SaveWords(ctx context.Context, words []model.ParsedWord) error
 	GetTopWords(ctx context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error)
+	SaveReviews(ctx context.Context, reviews []model.Review) error
+	GetReviews(ctx context.Context, brand string, limit int) ([]model.Review, error)
 }
 
 // ─── pgStore — реальная реализация через репозитории ─────────────────────────
 
 type pgStore struct {
-	jobs  *repository.ScrapeJobRepo
-	words *repository.ParsedWordRepo
+	jobs    *repository.ScrapeJobRepo
+	words   *repository.ParsedWordRepo
+	reviews *repository.ReviewRepo
 }
 
 func (s *pgStore) CreateJob(ctx context.Context, job *model.ScrapeJob) (*model.ScrapeJob, error) {
@@ -83,13 +108,20 @@ func (s *pgStore) SaveWords(ctx context.Context, words []model.ParsedWord) error
 func (s *pgStore) GetTopWords(ctx context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error) {
 	return s.words.GetTopWords(ctx, q)
 }
+func (s *pgStore) SaveReviews(ctx context.Context, reviews []model.Review) error {
+	return s.reviews.SaveBatch(ctx, reviews)
+}
+func (s *pgStore) GetReviews(ctx context.Context, brand string, limit int) ([]model.Review, error) {
+	return s.reviews.GetByBrand(ctx, brand, limit)
+}
 
 // ─── memStore — in-memory реализация для unit-тестов handler ─────────────────
 
 type memStore struct {
-	mu    sync.RWMutex
-	jobs  map[string]*model.ScrapeJob
-	words []model.ParsedWord
+	mu      sync.RWMutex
+	jobs    map[string]*model.ScrapeJob
+	words   []model.ParsedWord
+	reviews []model.Review
 }
 
 func newMemStore() *memStore {
@@ -123,6 +155,31 @@ func (s *memStore) SaveWords(_ context.Context, words []model.ParsedWord) error 
 	defer s.mu.Unlock()
 	s.words = append(s.words, words...)
 	return nil
+}
+
+func (s *memStore) SaveReviews(_ context.Context, reviews []model.Review) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reviews = append(s.reviews, reviews...)
+	return nil
+}
+
+func (s *memStore) GetReviews(_ context.Context, brand string, limit int) ([]model.Review, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	var results []model.Review
+	for _, r := range s.reviews {
+		if r.Brand == brand {
+			results = append(results, r)
+		}
+	}
+	if limit < len(results) {
+		results = results[:limit]
+	}
+	return results, nil
 }
 
 func (s *memStore) GetTopWords(_ context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error) {
@@ -159,9 +216,9 @@ func WithMemoryStore() option {
 	return func(h *Handler) { h.store = newMemStore() }
 }
 
-func WithPgStore(jobs *repository.ScrapeJobRepo, words *repository.ParsedWordRepo) option {
+func WithPgStore(jobs *repository.ScrapeJobRepo, words *repository.ParsedWordRepo, reviews *repository.ReviewRepo) option {
 	return func(h *Handler) {
-		h.store = &pgStore{jobs: jobs, words: words}
+		h.store = &pgStore{jobs: jobs, words: words, reviews: reviews}
 	}
 }
 
@@ -183,6 +240,7 @@ func New(opts ...option) *Handler {
 	h.mux.HandleFunc("/jobs", h.handleJobs)
 	h.mux.HandleFunc("/jobs/", h.handleJobByID)
 	h.mux.HandleFunc("/words", h.handleWords)
+	h.mux.HandleFunc("/reviews", h.handleReviews)
 	h.mux.HandleFunc("/health", h.handleHealth)
 	return h
 }
@@ -301,9 +359,17 @@ func (h *Handler) getTopWords(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
-		limit = 20
+	limitStr := r.URL.Query().Get("limit")
+	limit := 20
+	if limitStr != "" {
+		parsed, err := strconv.Atoi(limitStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		if parsed > 0 {
+			limit = parsed
+		}
 	}
 
 	results, err := h.store.GetTopWords(r.Context(), model.TopWordsQuery{Brand: brand, Limit: limit})
@@ -313,6 +379,90 @@ func (h *Handler) getTopWords(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, TopWordsResponse{Brand: brand, Words: results})
+}
+
+// ─── /reviews ────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleReviews(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		h.saveReviews(w, r)
+	case http.MethodGet:
+		h.getReviews(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) saveReviews(w http.ResponseWriter, r *http.Request) {
+	var req SaveReviewsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if strings.TrimSpace(req.Brand) == "" {
+		writeError(w, http.StatusBadRequest, "brand is required")
+		return
+	}
+	if strings.TrimSpace(req.SourceURL) == "" {
+		writeError(w, http.StatusBadRequest, "source_url is required")
+		return
+	}
+
+	reviews := make([]model.Review, len(req.Reviews))
+	for i, e := range req.Reviews {
+		reviews[i] = model.Review{
+			JobID:      req.JobID,
+			Brand:      req.Brand,
+			SourceURL:  req.SourceURL,
+			Title:      e.Title,
+			Text:       e.Text,
+			Rating:     e.Rating,
+			ReviewDate: e.ReviewDate,
+			Pros:       e.Pros,
+			Cons:       e.Cons,
+		}
+	}
+
+	if err := h.store.SaveReviews(r.Context(), reviews); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]int{"saved": len(reviews)})
+}
+
+func (h *Handler) getReviews(w http.ResponseWriter, r *http.Request) {
+	brand := r.URL.Query().Get("brand")
+	if brand == "" {
+		writeError(w, http.StatusBadRequest, "brand query parameter is required")
+		return
+	}
+
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50
+	if limitStr != "" {
+		parsed, err := strconv.Atoi(limitStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		if parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	reviews, err := h.store.GetReviews(r.Context(), brand, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ReviewsResponse{
+		Brand:   brand,
+		Total:   len(reviews),
+		Reviews: reviews,
+	})
 }
 
 // ─── /health ─────────────────────────────────────────────────────────────────

@@ -96,7 +96,9 @@ func NewDB(t *testing.T) *pgxpool.Pool {
 	RunMigrations(t, pool)
 
 	t.Cleanup(func() {
-		pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA %s CASCADE", schema))
+		if _, err := pool.Exec(ctx, fmt.Sprintf("DROP SCHEMA %s CASCADE", schema)); err != nil {
+			t.Logf("cleanup: drop schema %s: %v", schema, err)
+		}
 		pool.Close()
 	})
 

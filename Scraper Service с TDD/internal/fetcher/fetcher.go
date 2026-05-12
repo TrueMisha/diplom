@@ -73,10 +73,6 @@ func (f *HTTPFetcher) Fetch(url string) (*Result, error) {
 		if errors.Is(err, http.ErrHandlerTimeout) || isTimeoutError(err) {
 			return nil, ErrTimeout
 		}
-		// Все остальные сетевые ошибки (включая таймаут контекста)
-		if isTimeoutError(err) {
-			return nil, ErrTimeout
-		}
 		return nil, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()

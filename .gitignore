@@ -1,5 +1,6 @@
 # === Временные файлы систем и редакторов ===
-.idea/
+.idea/*
+!.idea/runConfigurations/
 .vscode/
 *.iml
 *.iws
@@ -20,10 +21,6 @@ chat_history/
 *.dylib
 bin/
 out/
-# Если у тебя есть конкретные имена сервисов, их тоже можно добавить:
-pipeline
-server
-worker
 
 # === Зависимости и кэш Go ===
 vendor/

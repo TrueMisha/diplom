@@ -1,0 +1,9 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Scraper" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="diplom" />
+    <working_directory value="$PROJECT_DIR$/Scraper Service с TDD" />
+    <kind value="FILE" />
+    <filePath value="$PROJECT_DIR$/Scraper Service с TDD/cmd/server/main.go" />
+    <method v="2" />
+  </configuration>
+</component>

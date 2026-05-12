@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="All Services" type="CompoundRunConfigurationType">
+    <toRun name="Normalizer" type="GoApplicationRunConfiguration" />
+    <toRun name="Scraper" type="GoApplicationRunConfiguration" />
+    <toRun name="Storage" type="GoApplicationRunConfiguration" />
+    <toRun name="Scheduler Server" type="GoApplicationRunConfiguration" />
+    <toRun name="Scheduler Worker" type="GoApplicationRunConfiguration" />
+    <method v="2" />
+  </configuration>
+</component>

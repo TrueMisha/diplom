@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Storage" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="diplom" />
+    <working_directory value="$PROJECT_DIR$/Storage Service с TDD" />
+    <kind value="FILE" />
+    <filePath value="$PROJECT_DIR$/Storage Service с TDD/cmd/server/main.go" />
+    <envs>
+      <env name="DATABASE_URL" value="postgres://postgres:postgres@127.0.0.1:5433/brandmon?sslmode=disable" />
+    </envs>
+    <method v="2" />
+  </configuration>
+</component>

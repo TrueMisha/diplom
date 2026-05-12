@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Scheduler Worker" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="diplom" />
+    <working_directory value="$PROJECT_DIR$/Scheduler Service с TDD" />
+    <kind value="FILE" />
+    <filePath value="$PROJECT_DIR$/Scheduler Service с TDD/cmd/worker/main.go" />
+    <envs>
+      <env name="SCRAPER_URL" value="http://localhost:8082" />
+      <env name="STORAGE_URL" value="http://localhost:8083" />
+    </envs>
+    <method v="2" />
+  </configuration>
+</component>

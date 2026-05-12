@@ -21,12 +21,14 @@ func (s *JSScraper) Scrape(rawURL string, opts Options) (*ScrapeResult, error) {
 		return s.scrapeBankiru(rawURL, opts)
 	case strings.Contains(rawURL, "otzovik.com"):
 		return s.scrapeOtzovik(rawURL, opts)
-	default:
+	case strings.Contains(rawURL, "irecommend.ru"):
 		return s.scrapeIrecommend(rawURL, opts)
+	default:
+		return nil, fmt.Errorf("unsupported URL for JS scraping: %s", rawURL)
 	}
 }
 
-func (s *JSScraper) scrapeIrecommend(rawURL string, opts Options) (*ScrapeResult, error) {
+func (s *JSScraper) scrapeIrecommend(rawURL string, _ Options) (*ScrapeResult, error) {
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(
 		context.Background(),
 		append(chromedp.DefaultExecAllocatorOptions[:],
@@ -61,12 +63,15 @@ func (s *JSScraper) scrapeIrecommend(rawURL string, opts Options) (*ScrapeResult
 		}
 
 		if !gdprDone {
-			_ = chromedp.Run(ctx,
+			// Кнопка GDPR может отсутствовать — игнорируем ошибку намеренно,
+			// но флаг выставляем только при успехе
+			if err := chromedp.Run(ctx,
 				chromedp.WaitVisible(`button.fc-cta-consent`, chromedp.ByQuery),
 				chromedp.Click(`button.fc-cta-consent`, chromedp.ByQuery),
 				chromedp.Sleep(2*time.Second),
-			)
-			gdprDone = true
+			); err == nil {
+				gdprDone = true
+			}
 		}
 
 		var pageText string
@@ -120,7 +125,7 @@ func (s *JSScraper) scrapeIrecommend(rawURL string, opts Options) (*ScrapeResult
 	}, nil
 }
 
-func (s *JSScraper) scrapeBankiru(rawURL string, opts Options) (*ScrapeResult, error) {
+func (s *JSScraper) scrapeBankiru(rawURL string, _ Options) (*ScrapeResult, error) {
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(
 		context.Background(),
 		append(chromedp.DefaultExecAllocatorOptions[:],
@@ -208,7 +213,7 @@ func (s *JSScraper) scrapeBankiru(rawURL string, opts Options) (*ScrapeResult, e
 	}, nil
 }
 
-func (s *JSScraper) scrapeOtzovik(rawURL string, opts Options) (*ScrapeResult, error) {
+func (s *JSScraper) scrapeOtzovik(rawURL string, _ Options) (*ScrapeResult, error) {
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(
 		context.Background(),
 		append(chromedp.DefaultExecAllocatorOptions[:],

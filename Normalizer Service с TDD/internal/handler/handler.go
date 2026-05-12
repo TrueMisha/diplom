@@ -101,7 +101,11 @@ func (h *Handler) handleCooccurrence(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Нормализуем текст перед построением co-occurrence
-	result, _ := normalizer.Normalize(req.Text, normalizer.DefaultConfig())
+	result, err := normalizer.Normalize(req.Text, normalizer.DefaultConfig())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	neighbors := normalizer.BuildCooccurrence(result.Words, req.Target, req.Window)
 
 	writeJSON(w, http.StatusOK, CooccurrenceResponse{

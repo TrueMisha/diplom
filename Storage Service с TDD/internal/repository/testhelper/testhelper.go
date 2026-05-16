@@ -110,6 +110,11 @@ func RunMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 
 	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS brands (
+			id         BIGSERIAL   PRIMARY KEY,
+			name       TEXT        NOT NULL UNIQUE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
 		`CREATE TABLE IF NOT EXISTS scrape_jobs (
 			id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
 			brand       TEXT        NOT NULL,
@@ -136,6 +141,20 @@ func RunMigrations(t *testing.T, pool *pgxpool.Pool) {
 			source_url  TEXT        NOT NULL,
 			word        TEXT        NOT NULL,
 			frequency   INT         NOT NULL DEFAULT 1,
+			scraped_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS reviews (
+			id          BIGSERIAL   PRIMARY KEY,
+			brand_id    BIGINT      REFERENCES brands(id) ON DELETE SET NULL,
+			job_id      UUID,
+			brand       TEXT        NOT NULL,
+			source_url  TEXT        NOT NULL,
+			title       TEXT        NOT NULL DEFAULT '',
+			text        TEXT        NOT NULL DEFAULT '',
+			rating      TEXT,
+			review_date TEXT,
+			pros        TEXT        NOT NULL DEFAULT '',
+			cons        TEXT        NOT NULL DEFAULT '',
 			scraped_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		`CREATE TABLE IF NOT EXISTS word_cooccurrence (

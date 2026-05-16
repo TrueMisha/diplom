@@ -295,6 +295,66 @@ func (r *CooccurrenceRepo) GetNeighbors(ctx context.Context, q model.Cooccurrenc
 	return results, rows.Err()
 }
 
+// ─── BrandRepository ─────────────────────────────────────────────────────────
+
+type BrandRepo struct {
+	db *pgxpool.Pool
+}
+
+func NewBrandRepo(db *pgxpool.Pool) *BrandRepo {
+	return &BrandRepo{db: db}
+}
+
+// GetOrCreate возвращает бренд по имени, создавая его если не существует.
+func (r *BrandRepo) GetOrCreate(ctx context.Context, name string) (*model.Brand, error) {
+	const q = `
+		INSERT INTO brands (name)
+		VALUES ($1)
+		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+		RETURNING id, name, created_at`
+
+	var b model.Brand
+	err := r.db.QueryRow(ctx, q, name).Scan(&b.ID, &b.Name, &b.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get or create brand: %w", err)
+	}
+	return &b, nil
+}
+
+func (r *BrandRepo) GetByID(ctx context.Context, id int64) (*model.Brand, error) {
+	const q = `SELECT id, name, created_at FROM brands WHERE id = $1`
+
+	var b model.Brand
+	err := r.db.QueryRow(ctx, q, id).Scan(&b.ID, &b.Name, &b.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get brand by id: %w", err)
+	}
+	return &b, nil
+}
+
+func (r *BrandRepo) List(ctx context.Context) ([]*model.Brand, error) {
+	const q = `SELECT id, name, created_at FROM brands ORDER BY name ASC`
+
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list brands: %w", err)
+	}
+	defer rows.Close()
+
+	var brands []*model.Brand
+	for rows.Next() {
+		var b model.Brand
+		if err := rows.Scan(&b.ID, &b.Name, &b.CreatedAt); err != nil {
+			return nil, err
+		}
+		brands = append(brands, &b)
+	}
+	return brands, rows.Err()
+}
+
 // ─── ReviewRepository ─────────────────────────────────────────────────────────
 
 type ReviewRepo struct {
@@ -312,11 +372,11 @@ func (r *ReviewRepo) SaveBatch(ctx context.Context, reviews []model.Review) erro
 
 	batch := &pgx.Batch{}
 	const q = `
-		INSERT INTO reviews (job_id, brand, source_url, title, text, rating, review_date, pros, cons)
-		VALUES (NULLIF($1, '')::uuid, $2, $3, $4, $5, $6, NULLIF($7, ''), $8, $9)`
+		INSERT INTO reviews (brand_id, job_id, brand, source_url, title, text, rating, review_date, pros, cons)
+		VALUES ($1, NULLIF($2, '')::uuid, $3, $4, $5, $6, $7, NULLIF($8, ''), $9, $10)`
 
 	for _, rv := range reviews {
-		batch.Queue(q, rv.JobID, rv.Brand, rv.SourceURL,
+		batch.Queue(q, rv.BrandID, rv.JobID, rv.Brand, rv.SourceURL,
 			rv.Title, rv.Text, rv.Rating, rv.ReviewDate, rv.Pros, rv.Cons)
 	}
 
@@ -337,7 +397,7 @@ func (r *ReviewRepo) GetByBrand(ctx context.Context, brand string, limit int) ([
 	}
 
 	const q = `
-		SELECT id, COALESCE(job_id::text, ''), brand, source_url,
+		SELECT id, brand_id, COALESCE(job_id::text, ''), brand, source_url,
 		       title, text, rating, COALESCE(review_date, ''), pros, cons, scraped_at
 		FROM reviews
 		WHERE brand = $1
@@ -353,7 +413,7 @@ func (r *ReviewRepo) GetByBrand(ctx context.Context, brand string, limit int) ([
 	var results []model.Review
 	for rows.Next() {
 		var rv model.Review
-		if err := rows.Scan(&rv.ID, &rv.JobID, &rv.Brand, &rv.SourceURL,
+		if err := rows.Scan(&rv.ID, &rv.BrandID, &rv.JobID, &rv.Brand, &rv.SourceURL,
 			&rv.Title, &rv.Text, &rv.Rating, &rv.ReviewDate,
 			&rv.Pros, &rv.Cons, &rv.ScrapedAt); err != nil {
 			return nil, err

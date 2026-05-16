@@ -86,6 +86,8 @@ type Store interface {
 	GetTopWords(ctx context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error)
 	SaveReviews(ctx context.Context, reviews []model.Review) error
 	GetReviews(ctx context.Context, brand string, limit int) ([]model.Review, error)
+	GetOrCreateBrand(ctx context.Context, name string) (*model.Brand, error)
+	ListBrands(ctx context.Context) ([]*model.Brand, error)
 }
 
 // ─── pgStore — реальная реализация через репозитории ─────────────────────────
@@ -94,6 +96,7 @@ type pgStore struct {
 	jobs    *repository.ScrapeJobRepo
 	words   *repository.ParsedWordRepo
 	reviews *repository.ReviewRepo
+	brands  *repository.BrandRepo
 }
 
 func (s *pgStore) CreateJob(ctx context.Context, job *model.ScrapeJob) (*model.ScrapeJob, error) {
@@ -114,6 +117,12 @@ func (s *pgStore) SaveReviews(ctx context.Context, reviews []model.Review) error
 func (s *pgStore) GetReviews(ctx context.Context, brand string, limit int) ([]model.Review, error) {
 	return s.reviews.GetByBrand(ctx, brand, limit)
 }
+func (s *pgStore) GetOrCreateBrand(ctx context.Context, name string) (*model.Brand, error) {
+	return s.brands.GetOrCreate(ctx, name)
+}
+func (s *pgStore) ListBrands(ctx context.Context) ([]*model.Brand, error) {
+	return s.brands.List(ctx)
+}
 
 // ─── memStore — in-memory реализация для unit-тестов handler ─────────────────
 
@@ -122,10 +131,15 @@ type memStore struct {
 	jobs    map[string]*model.ScrapeJob
 	words   []model.ParsedWord
 	reviews []model.Review
+	brands  map[string]*model.Brand
+	nextID  int64
 }
 
 func newMemStore() *memStore {
-	return &memStore{jobs: make(map[string]*model.ScrapeJob)}
+	return &memStore{
+		jobs:   make(map[string]*model.ScrapeJob),
+		brands: make(map[string]*model.Brand),
+	}
 }
 
 func (s *memStore) CreateJob(_ context.Context, job *model.ScrapeJob) (*model.ScrapeJob, error) {
@@ -182,6 +196,28 @@ func (s *memStore) GetReviews(_ context.Context, brand string, limit int) ([]mod
 	return results, nil
 }
 
+func (s *memStore) GetOrCreateBrand(_ context.Context, name string) (*model.Brand, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if b, ok := s.brands[name]; ok {
+		return b, nil
+	}
+	s.nextID++
+	b := &model.Brand{ID: s.nextID, Name: name, CreatedAt: time.Now()}
+	s.brands[name] = b
+	return b, nil
+}
+
+func (s *memStore) ListBrands(_ context.Context) ([]*model.Brand, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*model.Brand, 0, len(s.brands))
+	for _, b := range s.brands {
+		list = append(list, b)
+	}
+	return list, nil
+}
+
 func (s *memStore) GetTopWords(_ context.Context, q model.TopWordsQuery) ([]model.WordFreqResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -216,9 +252,9 @@ func WithMemoryStore() option {
 	return func(h *Handler) { h.store = newMemStore() }
 }
 
-func WithPgStore(jobs *repository.ScrapeJobRepo, words *repository.ParsedWordRepo, reviews *repository.ReviewRepo) option {
+func WithPgStore(jobs *repository.ScrapeJobRepo, words *repository.ParsedWordRepo, reviews *repository.ReviewRepo, brands *repository.BrandRepo) option {
 	return func(h *Handler) {
-		h.store = &pgStore{jobs: jobs, words: words, reviews: reviews}
+		h.store = &pgStore{jobs: jobs, words: words, reviews: reviews, brands: brands}
 	}
 }
 
@@ -241,6 +277,7 @@ func New(opts ...option) *Handler {
 	h.mux.HandleFunc("/jobs/", h.handleJobByID)
 	h.mux.HandleFunc("/words", h.handleWords)
 	h.mux.HandleFunc("/reviews", h.handleReviews)
+	h.mux.HandleFunc("/brands", h.handleBrands)
 	h.mux.HandleFunc("/health", h.handleHealth)
 	return h
 }
@@ -409,9 +446,16 @@ func (h *Handler) saveReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	brand, err := h.store.GetOrCreateBrand(r.Context(), req.Brand)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	reviews := make([]model.Review, len(req.Reviews))
 	for i, e := range req.Reviews {
 		reviews[i] = model.Review{
+			BrandID:    brand.ID,
 			JobID:      req.JobID,
 			Brand:      req.Brand,
 			SourceURL:  req.SourceURL,
@@ -429,7 +473,7 @@ func (h *Handler) saveReviews(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]int{"saved": len(reviews)})
+	writeJSON(w, http.StatusCreated, map[string]any{"saved": len(reviews), "brand_id": brand.ID})
 }
 
 func (h *Handler) getReviews(w http.ResponseWriter, r *http.Request) {
@@ -463,6 +507,24 @@ func (h *Handler) getReviews(w http.ResponseWriter, r *http.Request) {
 		Total:   len(reviews),
 		Reviews: reviews,
 	})
+}
+
+// ─── /brands ─────────────────────────────────────────────────────────────────
+
+func (h *Handler) handleBrands(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	brands, err := h.store.ListBrands(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if brands == nil {
+		brands = []*model.Brand{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"brands": brands})
 }
 
 // ─── /health ─────────────────────────────────────────────────────────────────

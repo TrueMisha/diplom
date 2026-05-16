@@ -462,7 +462,24 @@ GET /words?brand=Сбербанк&limit=10
 ```
 **Ответ `201`:**
 ```json
-{ "saved": 1 }
+{ "saved": 1, "brand_id": 3 }
+```
+
+> `brand_id` — ID бренда, автоматически созданного (или найденного) в таблице `brands`.
+
+---
+
+#### `GET /brands`
+Возвращает список всех брендов.
+
+**Ответ `200`:**
+```json
+{
+  "brands": [
+    { "id": 1, "name": "Сбербанк", "created_at": "2024-01-01T00:00:00Z" },
+    { "id": 2, "name": "Тинькофф", "created_at": "2024-01-02T00:00:00Z" }
+  ]
+}
 ```
 
 ---
@@ -481,6 +498,7 @@ GET /reviews?brand=Сбербанк&limit=50
   "reviews": [
     {
       "id": 1,
+      "brand_id": 3,
       "brand": "Сбербанк",
       "source_url": "https://irecommend.ru/content/sberbank",
       "title": "Отличный банк",
@@ -584,6 +602,26 @@ curl -X POST http://localhost:8082/scrape \
 
 Миграции применяются **автоматически** при старте Storage Service.
 
+### Таблица `brands` — бренды
+
+Справочник брендов. Заполняется автоматически при первом сохранении отзывов.
+
+| Колонка | Тип | Описание |
+|---|---|---|
+| `id` | BIGSERIAL (PK) | Уникальный идентификатор |
+| `name` | TEXT (UNIQUE) | Название бренда |
+| `created_at` | TIMESTAMPTZ | Дата первой записи |
+
+```sql
+CREATE TABLE brands (
+    id         BIGSERIAL   PRIMARY KEY,
+    name       TEXT        NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+---
+
 ### Таблица `reviews` — целые отзывы
 
 Основная таблица с полными текстами отзывов.
@@ -591,8 +629,9 @@ curl -X POST http://localhost:8082/scrape \
 | Колонка | Тип | Описание |
 |---|---|---|
 | `id` | BIGSERIAL (PK) | Уникальный идентификатор |
+| `brand_id` | BIGINT (FK → brands) | ID бренда |
 | `job_id` | UUID | Ссылка на задачу парсинга |
-| `brand` | TEXT | Название бренда |
+| `brand` | TEXT | Название бренда (денормализованное) |
 | `source_url` | TEXT | URL источника |
 | `title` | TEXT | Заголовок отзыва |
 | `text` | TEXT | Полный текст отзыва |

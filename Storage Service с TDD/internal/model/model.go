@@ -97,20 +97,29 @@ type WordCooccurrence struct {
 	ScrapedAt  time.Time `json:"scraped_at"`
 }
 
+// ─── Brand ────────────────────────────────────────────────────────────────────
+
+type Brand struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // ─── Review ───────────────────────────────────────────────────────────────────
 
 type Review struct {
-	ID        int64      `json:"id"`
-	JobID     string     `json:"job_id,omitempty"`
-	Brand     string     `json:"brand"`
-	SourceURL string     `json:"source_url"`
-	Title     string     `json:"title"`
-	Text      string     `json:"text"`
-	Rating    string     `json:"rating,omitempty"`
-	ReviewDate string    `json:"review_date,omitempty"`
-	Pros      string     `json:"pros,omitempty"`
-	Cons      string     `json:"cons,omitempty"`
-	ScrapedAt time.Time  `json:"scraped_at"`
+	ID         int64      `json:"id"`
+	BrandID    int64      `json:"brand_id"`
+	JobID      string     `json:"job_id,omitempty"`
+	Brand      string     `json:"brand"`
+	SourceURL  string     `json:"source_url"`
+	Title      string     `json:"title"`
+	Text       string     `json:"text"`
+	Rating     string     `json:"rating,omitempty"`
+	ReviewDate string     `json:"review_date,omitempty"`
+	Pros       string     `json:"pros,omitempty"`
+	Cons       string     `json:"cons,omitempty"`
+	ScrapedAt  time.Time  `json:"scraped_at"`
 }
 
 // ─── Query types ──────────────────────────────────────────────────────────────

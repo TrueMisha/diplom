@@ -23,6 +23,14 @@ func getEnv(key, fallback string) string {
 
 // migrations — DDL, применяемый при старте если БД пуста.
 const migrations = `
+CREATE TABLE IF NOT EXISTS brands (
+    id         BIGSERIAL   PRIMARY KEY,
+    name       TEXT        NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_brands_name ON brands(name);
+
 CREATE TABLE IF NOT EXISTS scrape_jobs (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     brand       TEXT        NOT NULL,
@@ -44,13 +52,14 @@ CREATE TABLE IF NOT EXISTS parsed_words (
     scraped_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_scrape_jobs_brand      ON scrape_jobs(brand);
-CREATE INDEX IF NOT EXISTS idx_scrape_jobs_status     ON scrape_jobs(status);
-CREATE INDEX IF NOT EXISTS idx_parsed_words_brand     ON parsed_words(brand);
+CREATE INDEX IF NOT EXISTS idx_scrape_jobs_brand       ON scrape_jobs(brand);
+CREATE INDEX IF NOT EXISTS idx_scrape_jobs_status      ON scrape_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_parsed_words_brand      ON parsed_words(brand);
 CREATE INDEX IF NOT EXISTS idx_parsed_words_brand_word ON parsed_words(brand, word);
 
 CREATE TABLE IF NOT EXISTS reviews (
     id          BIGSERIAL   PRIMARY KEY,
+    brand_id    BIGINT      REFERENCES brands(id) ON DELETE SET NULL,
     job_id      UUID,
     brand       TEXT        NOT NULL,
     source_url  TEXT        NOT NULL,
@@ -64,6 +73,7 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reviews_brand      ON reviews(brand);
+CREATE INDEX IF NOT EXISTS idx_reviews_brand_id   ON reviews(brand_id);
 CREATE INDEX IF NOT EXISTS idx_reviews_scraped_at ON reviews(scraped_at DESC);
 `
 
@@ -95,8 +105,9 @@ func main() {
 		jobRepo    := repository.NewScrapeJobRepo(pool)
 		wordRepo   := repository.NewParsedWordRepo(pool)
 		reviewRepo := repository.NewReviewRepo(pool)
+		brandRepo  := repository.NewBrandRepo(pool)
 
-		h = handler.New(handler.WithPgStore(jobRepo, wordRepo, reviewRepo))
+		h = handler.New(handler.WithPgStore(jobRepo, wordRepo, reviewRepo, brandRepo))
 		log.Printf("storage-service: using PostgreSQL (%s)", databaseURL)
 	} else {
 

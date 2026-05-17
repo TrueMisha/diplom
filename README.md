@@ -32,20 +32,22 @@
 ```
 1. POST /schedule → задача попадает в Redis очередь
 2. Worker забирает задачу → вызывает POST /scrape
-3. Scraper парсит страницу → возвращает список отзывов целиком
-4. Worker сохраняет отзывы → POST /reviews (таблица reviews в БД)
-5. Результат доступен → GET /reviews?brand=Сбербанк
-
-Параллельно можно:
-- Нормализовать текст → POST /normalize (частота слов)
-- Сохранить слова     → POST /words     (таблица parsed_words)
-- Получить топ слов   → GET /words?brand=Сбербанк
+3. Scraper парсит страницу → возвращает список отзывов
+4. Worker сохраняет отзывы → POST /reviews
+   └─ Storage автоматически создаёт запись в таблице brands (GET or CREATE)
+5. Worker собирает текст отзывов → POST /normalize (Normalizer Service)
+6. Worker сохраняет частоты слов → POST /words (таблица parsed_words)
+7. Результаты доступны:
+   GET /reviews?brand=...   — целые отзывы
+   GET /words?brand=...     — топ слов
+   GET /brands              — список брендов
 ```
 
 ### Что где хранится
 
 | Таблица | Что содержит | Как получить |
 |---|---|---|
+| `brands` | Справочник брендов, создаётся автоматически | `GET /brands` |
 | `reviews` | Целые отзывы (заголовок, текст, рейтинг, дата) | `GET /reviews?brand=...` |
 | `parsed_words` | Слова из отзывов с частотой встречаемости | `GET /words?brand=...` |
 | `word_cooccurrence` | Какие слова стоят рядом с целевым словом | через репозиторий напрямую |
@@ -118,6 +120,7 @@ go run ./cmd/server
 cd "Scheduler Service с TDD"
 SCRAPER_URL=http://localhost:8082 \
 STORAGE_URL=http://localhost:8083 \
+NORMALIZER_URL=http://localhost:8081 \
 go run ./cmd/worker
 ```
 
@@ -162,6 +165,7 @@ curl http://localhost:8084/health  # {"status":"ok"}
 | Scheduler Worker | `REDIS_ADDR` | `localhost:6379` | Адрес Redis |
 | Scheduler Worker | `SCRAPER_URL` | `http://localhost:8082` | URL Scraper Service |
 | Scheduler Worker | `STORAGE_URL` | `http://localhost:8083` | URL Storage Service |
+| Scheduler Worker | `NORMALIZER_URL` | `http://localhost:8081` | URL Normalizer Service |
 
 ---
 
@@ -201,12 +205,20 @@ docker exec -it postgres psql -U postgres -d brandmon
 \dt
 
 -- Структура таблицы
+\d brands
 \d reviews
 \d parsed_words
 \d scrape_jobs
 
+-- Все бренды с количеством отзывов
+SELECT b.id, b.name, COUNT(r.id) AS reviews_count, b.created_at
+FROM brands b
+LEFT JOIN reviews r ON r.brand_id = b.id
+GROUP BY b.id, b.name, b.created_at
+ORDER BY reviews_count DESC;
+
 -- Посмотреть все отзывы
-SELECT id, brand, source_url, title, rating, review_date, scraped_at
+SELECT id, brand_id, brand, title, rating, review_date, scraped_at
 FROM reviews
 ORDER BY scraped_at DESC
 LIMIT 20;
@@ -218,7 +230,7 @@ WHERE brand = 'Сбербанк'
 ORDER BY scraped_at DESC;
 
 -- Топ слов по бренду
-SELECT word, SUM(frequency) as total
+SELECT word, SUM(frequency) AS total
 FROM parsed_words
 WHERE brand = 'Сбербанк'
 GROUP BY word
@@ -230,10 +242,11 @@ SELECT brand, url, status, created_at, finished_at
 FROM scrape_jobs
 ORDER BY created_at DESC;
 
--- Количество отзывов по брендам
-SELECT brand, COUNT(*) as reviews_count
-FROM reviews
-GROUP BY brand
+-- Количество отзывов по брендам (через таблицу brands)
+SELECT b.name, COUNT(r.id) AS reviews_count
+FROM brands b
+LEFT JOIN reviews r ON r.brand_id = b.id
+GROUP BY b.name
 ORDER BY reviews_count DESC;
 ```
 
@@ -571,22 +584,31 @@ curl -X POST http://localhost:8084/schedule \
     "source_type": "js"
   }'
 # Ответ: {"status":"queued",...}
-# Worker автоматически: заберёт → спарсит → сохранит в БД
+# Worker автоматически:
+#   1. Берёт задачу из Redis
+#   2. Вызывает Scraper → получает отзывы
+#   3. Сохраняет отзывы в Storage → POST /reviews
+#      (бренд создаётся в таблице brands автоматически)
+#   4. Нормализует текст отзывов → POST /normalize
+#   5. Сохраняет частоты слов → POST /words
 
 # 2. Подождать завершения парсинга (js-источники занимают 3-5 минут)
 
-# 3. Получить сохранённые целые отзывы
+# 3. Список всех брендов
+curl "http://localhost:8083/brands"
+
+# 4. Получить сохранённые отзывы
 curl "http://localhost:8083/reviews?brand=Сбербанк&limit=20"
 
-# 4. Получить топ слов по бренду
+# 5. Получить топ слов по бренду
 curl "http://localhost:8083/words?brand=Сбербанк&limit=10"
 
-# 5. Нормализовать произвольный текст
+# 6. Нормализовать произвольный текст
 curl -X POST http://localhost:8081/normalize \
   -H "Content-Type: application/json" \
   -d '{"text": "Сбербанк отличный банк, работает быстро и удобно"}'
 
-# 6. Или спарсить напрямую без сохранения в БД
+# 7. Или спарсить напрямую без сохранения в БД
 curl -X POST http://localhost:8082/scrape \
   -H "Content-Type: application/json" \
   -d '{
@@ -644,6 +666,7 @@ CREATE TABLE brands (
 ```sql
 CREATE TABLE reviews (
     id          BIGSERIAL   PRIMARY KEY,
+    brand_id    BIGINT      REFERENCES brands(id) ON DELETE SET NULL,
     job_id      UUID,
     brand       TEXT        NOT NULL,
     source_url  TEXT        NOT NULL,
@@ -749,11 +772,13 @@ CREATE TABLE scrape_jobs (
 ### Индексы
 
 ```sql
+CREATE INDEX idx_brands_name             ON brands(name);
 CREATE INDEX idx_scrape_jobs_brand       ON scrape_jobs(brand);
 CREATE INDEX idx_scrape_jobs_status      ON scrape_jobs(status);
 CREATE INDEX idx_parsed_words_brand      ON parsed_words(brand);
 CREATE INDEX idx_parsed_words_brand_word ON parsed_words(brand, word);
 CREATE INDEX idx_reviews_brand           ON reviews(brand);
+CREATE INDEX idx_reviews_brand_id        ON reviews(brand_id);
 CREATE INDEX idx_reviews_scraped_at      ON reviews(scraped_at DESC);
 ```
 

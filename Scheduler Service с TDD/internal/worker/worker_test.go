@@ -19,11 +19,12 @@ import (
 // ─── Stub HTTP client ─────────────────────────────────────────────────────────
 
 type stubClient struct {
-	mu       sync.Mutex
-	calls    []stubCall // все вызовы по порядку
-	scraperStatus  int
-	storageStatus  int
-	scraperBody    string
+	mu              sync.Mutex
+	calls           []stubCall
+	scraperStatus   int
+	storageStatus   int
+	normalizerStatus int
+	scraperBody     string
 }
 
 type stubCall struct {
@@ -37,17 +38,31 @@ func (c *stubClient) Do(req *http.Request) (*http.Response, error) {
 	c.calls = append(c.calls, stubCall{url: req.URL.String(), body: body})
 	c.mu.Unlock()
 
-	if strings.Contains(req.URL.String(), "/scrape") {
+	u := req.URL.String()
+	switch {
+	case strings.Contains(u, "/scrape"):
 		return &http.Response{
 			StatusCode: c.scraperStatus,
 			Body:       io.NopCloser(strings.NewReader(c.scraperBody)),
 		}, nil
+	case strings.Contains(u, "/normalize"):
+		status := c.normalizerStatus
+		if status == 0 {
+			status = http.StatusOK
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body: io.NopCloser(strings.NewReader(
+				`{"words":["банк","хороший"],"frequencies":[{"word":"банк","frequency":1}]}`,
+			)),
+		}, nil
+	default:
+		// /reviews и /words
+		return &http.Response{
+			StatusCode: c.storageStatus,
+			Body:       io.NopCloser(strings.NewReader(`{"saved":1,"brand_id":1}`)),
+		}, nil
 	}
-	// /reviews
-	return &http.Response{
-		StatusCode: c.storageStatus,
-		Body:       io.NopCloser(strings.NewReader(`{"saved":1}`)),
-	}, nil
 }
 
 const scraperOKBody = `{
@@ -67,7 +82,7 @@ func TestScrapeWorker_ProcessTask_OK(t *testing.T) {
 		storageStatus: http.StatusCreated,
 		scraperBody:   scraperOKBody,
 	}
-	w := worker.New("http://scraper", "http://storage", stub)
+	w := worker.New("http://scraper", "http://storage", "http://normalizer", stub)
 
 	task, err := tasks.NewScrapeTask(tasks.ScrapePayload{
 		Brand:      "сбер",
@@ -79,10 +94,10 @@ func TestScrapeWorker_ProcessTask_OK(t *testing.T) {
 	err = w.ProcessTask(context.Background(), task)
 	require.NoError(t, err)
 
-	// Должно быть 2 вызова: /scrape и /reviews
-	require.Len(t, stub.calls, 2)
+	// Должно быть 4 вызова: /scrape → /reviews → /normalize → /words
+	require.Len(t, stub.calls, 4)
 
-	// Первый — к скраперу
+	// 1. Скрапер
 	assert.Contains(t, stub.calls[0].url, "/scrape")
 	var scraperReq map[string]string
 	require.NoError(t, json.Unmarshal(stub.calls[0].body, &scraperReq))
@@ -90,11 +105,17 @@ func TestScrapeWorker_ProcessTask_OK(t *testing.T) {
 	assert.Equal(t, "https://example.com", scraperReq["url"])
 	assert.Equal(t, "html", scraperReq["source_type"])
 
-	// Второй — к storage /reviews
+	// 2. Storage /reviews
 	assert.Contains(t, stub.calls[1].url, "/reviews")
 	var storageReq map[string]interface{}
 	require.NoError(t, json.Unmarshal(stub.calls[1].body, &storageReq))
 	assert.Equal(t, "сбер", storageReq["brand"])
+
+	// 3. Нормализатор
+	assert.Contains(t, stub.calls[2].url, "/normalize")
+
+	// 4. Storage /words
+	assert.Contains(t, stub.calls[3].url, "/words")
 }
 
 func TestScrapeWorker_ProcessTask_NoReviews_SkipsStorage(t *testing.T) {
@@ -104,7 +125,7 @@ func TestScrapeWorker_ProcessTask_NoReviews_SkipsStorage(t *testing.T) {
 		scraperBody: `{"job_id":"abc","brand":"тест","url":"https://example.com",
 			"scraped_at":"2024-01-01T00:00:00Z","reviews":[]}`,
 	}
-	w := worker.New("http://scraper", "http://storage", stub)
+	w := worker.New("http://scraper", "http://storage", "http://normalizer", stub)
 
 	task, _ := tasks.NewScrapeTask(tasks.ScrapePayload{
 		Brand: "тест", URL: "https://example.com", SourceType: "html",
@@ -113,13 +134,13 @@ func TestScrapeWorker_ProcessTask_NoReviews_SkipsStorage(t *testing.T) {
 	err := w.ProcessTask(context.Background(), task)
 	require.NoError(t, err)
 
-	// Только 1 вызов — к скраперу, storage не вызывался (нет отзывов)
+	// Только 1 вызов — к скраперу, storage и normalizer не вызывались (нет отзывов)
 	assert.Len(t, stub.calls, 1)
 }
 
 func TestScrapeWorker_ProcessTask_ScraperError(t *testing.T) {
 	stub := &stubClient{scraperStatus: http.StatusInternalServerError, scraperBody: `{"error":"boom"}`}
-	w := worker.New("http://scraper", "http://storage", stub)
+	w := worker.New("http://scraper", "http://storage", "http://normalizer", stub)
 
 	task, _ := tasks.NewScrapeTask(tasks.ScrapePayload{
 		Brand:      "test",
@@ -138,7 +159,7 @@ func TestScrapeWorker_ProcessTask_StorageError_NotFatal(t *testing.T) {
 		storageStatus: http.StatusInternalServerError,
 		scraperBody:   scraperOKBody,
 	}
-	w := worker.New("http://scraper", "http://storage", stub)
+	w := worker.New("http://scraper", "http://storage", "http://normalizer", stub)
 
 	task, _ := tasks.NewScrapeTask(tasks.ScrapePayload{
 		Brand: "сбер", URL: "https://example.com", SourceType: "html",

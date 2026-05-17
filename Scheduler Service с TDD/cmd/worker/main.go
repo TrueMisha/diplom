@@ -18,9 +18,10 @@ func getEnv(key, fallback string) string {
 }
 
 func main() {
-	redisAddr   := getEnv("REDIS_ADDR",   "localhost:6379")
-	scraperURL  := getEnv("SCRAPER_URL",  "http://localhost:8082")
-	storageURL  := getEnv("STORAGE_URL",  "http://localhost:8083")
+	redisAddr     := getEnv("REDIS_ADDR",     "localhost:6379")
+	scraperURL    := getEnv("SCRAPER_URL",    "http://localhost:8082")
+	storageURL    := getEnv("STORAGE_URL",    "http://localhost:8083")
+	normalizerURL := getEnv("NORMALIZER_URL", "http://localhost:8081")
 
 	srv := asynq.NewServer(
 		asynq.RedisClientOpt{Addr: redisAddr},
@@ -32,11 +33,11 @@ func main() {
 
 	mux := asynq.NewServeMux()
 
-	w := worker.New(scraperURL, storageURL, nil)
+	w := worker.New(scraperURL, storageURL, normalizerURL, nil)
 	mux.HandleFunc(tasks.TypeScrape, w.ProcessTask)
 
-	log.Printf("scheduler-worker started (redis=%s scraper=%s storage=%s)",
-		redisAddr, scraperURL, storageURL)
+	log.Printf("scheduler-worker started (redis=%s scraper=%s storage=%s normalizer=%s)",
+		redisAddr, scraperURL, storageURL, normalizerURL)
 	if err := srv.Run(mux); err != nil {
 		log.Fatal(err)
 	}

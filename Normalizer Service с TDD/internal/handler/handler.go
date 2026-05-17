@@ -2,7 +2,10 @@ package handler
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
+	"unicode"
 
 	"github.com/brandmon/normalizer-service/internal/normalizer"
 )
@@ -59,8 +62,15 @@ func (h *Handler) handleNormalize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read body: "+err.Error())
+		return
+	}
+	raw = sanitizeJSON(raw)
+
 	var req NormalizeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -130,4 +140,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, ErrorResponse{Error: msg})
+}
+
+// sanitizeJSON заменяет управляющие символы (0x00–0x1F кроме \t\n\r)
+// на пробел, чтобы json.Unmarshal не падал на тексте из браузерных скраперов.
+func sanitizeJSON(b []byte) []byte {
+	s := strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return r
+		}
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, string(b))
+	return []byte(s)
 }
